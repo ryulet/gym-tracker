@@ -145,16 +145,24 @@ function daysRemaining(endDate){if(!endDate)return null;var n=new Date();n.setHo
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
 /* ============================ データ層 ============================ */
-/* 種目ごとのレスト秒数：名前から自動判定（重い複合=長, 中=中, 軽い効かせ=短）。
-   exに rest があればそれを優先（アプリ上で個別変更できる） */
+/* 種目ごとのレスト秒数：名前から自動判定（4段階・研究＋りゅうくんの実態ベース）。
+   exに rest があればそれを優先（メニューJSONやアプリで個別変更できる）。
+   長め150=高重量の主役級複合 / 中長120=中重量複合や息が上がる種目 /
+   中90=効かせたい単関節 / 短60=軽い効かせ系 */
 function restFor(ex){
   if(ex && typeof ex.rest==="number") return ex.rest;
   var n=(ex&&ex.name)||"";
-  var LONG=["ベンチ","ラットプル","シーテッドロー","懸垂","デッド","スクワット","OHP"];
-  var SHORT=["フェイスプル","サイドレイズ","リアレイズ","クランチ","立ちコロ","ペックフライ","クロスオーバー","プッシュダウン"];
-  for(var i=0;i<LONG.length;i++){if(n.indexOf(LONG[i])>=0)return 120;}
-  for(var j=0;j<SHORT.length;j++){if(n.indexOf(SHORT[j])>=0)return 45;}
-  return 75; // 中（カール、ロウ、EXTなど）
+  var has=function(arr){for(var i=0;i<arr.length;i++){if(n.indexOf(arr[i])>=0)return true;}return false;};
+  // ① 60秒：軽い効かせ・単関節（先に判定。インクラインリアレイズ等の巻き込み防止）
+  if(has(["サイドレイズ","リアレイズ","フェイスプル","クランチ","立ちコロ","アブローラー","カーフ"])) return 60;
+  // ② 90秒：単関節の中重量（カール・EXT・プッシュダウン・フライ。インクラインDBカール等もここ）
+  if(has(["カール","エクステンション","EXT","プッシュダウン","フライ","キックバック"])) return 90;
+  // ③ 150秒：高重量の主役級複合
+  if(has(["ベンチ","ラットプル","シーテッドロー","シーテッドロウ","懸垂","チンニング","ディップス","デッド","スクワット"])) return 150;
+  // ④ 120秒：中重量の複合 or 息が上がる種目
+  if(has(["インクライン","チェストサポート","DBプレス","ダンベルプレス","ショルダープレス","クロスオーバー","ワイパー","ハンギング","ニーレイズ","レッグレイズ","OHP","ロー","ロウ","プレス"])) return 120;
+  // それ以外
+  return 90;
 }
 function fmtRest(sec){var m=Math.floor(sec/60),s=sec%60;return m+":"+String(s).padStart(2,"0");}
 
