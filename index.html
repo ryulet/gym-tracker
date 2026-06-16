@@ -476,10 +476,20 @@ function exportToday(){
     var lines=[];
     for(var i=0;i<setCountFor(ex);i++){
       var sd=s.sets[ex.id+"_s"+i];
-      if(sd && (sd.weight!=="" || sd.reps!=="")){
-        var w=sd.weight!==""?sd.weight:"—";
-        var r=sd.reps!==""?sd.reps:"—";
-        lines.push("  Set"+(i+1)+": "+w+"kg × "+r+"回"+(sd.done?" ✓":""));
+      if(!sd) continue;
+      var hasInput=(sd.weight!=="" || sd.reps!=="");
+      // 数字が入っている、または「完了✓」が押されていれば出力対象
+      if(hasInput || sd.done){
+        var w=sd.weight, r=sd.reps;
+        // 完了✓だけで数字が空のときは、前回値で補完（「前回と同じ」を表現）
+        var filledFromPrev=false;
+        if(sd.done && !hasInput){
+          var pv=prevSet(UI.day,ex.id,i);
+          if(pv){ w=pv.weight; r=pv.reps; filledFromPrev=true; }
+        }
+        var wd=(w!==""&&w!=null)?w:"—";
+        var rd=(r!==""&&r!=null)?r:"—";
+        lines.push("  Set"+(i+1)+": "+wd+"kg × "+rd+"回"+(sd.done?" ✓":"")+(filledFromPrev?"（前回と同じ）":""));
       }
     }
     if(lines.length){
