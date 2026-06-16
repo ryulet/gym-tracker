@@ -386,9 +386,8 @@ function toggleSkip(exId){
   if(s.skipped[exId]){ delete s.skipped[exId]; }
   else{
     s.skipped[exId]=true;
-    // お休みにしたら、その種目の当日入力はクリア（前回値の紛れ込み防止）
-    var ex=null; menu()[UI.day].exercises.forEach(function(e){if(e.id===exId)ex=e;});
-    if(ex){ var nn=ex.sets+((s.extraSets&&s.extraSets[exId])||0); for(var i=0;i<nn;i++){ delete s.sets[exId+"_s"+i]; } }
+    // 入力データは消さない（お休み解除で元の記録が戻るように）。お休みフラグだけ立てる。
+    // コピー出力では「お休み」と表示して実記録は出さない制御を入れているので、データを残しても混ざらない。
   }
   s.date=t; s.day=UI.day;
   sessions()[key]=s;
@@ -828,14 +827,22 @@ function bind(){
   Array.prototype.forEach.call(root.querySelectorAll('input[data-field]'),function(inp){
     var f=inp.getAttribute("data-field");
     if(f==="weight"||f==="reps"){
-      inp.addEventListener("input",function(){
+      var saveVal=function(){
         var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
         var patch={};patch[f]=inp.value;writeSet(ex,si,patch);
         flashSaved(ex,si);
         markFilled(ex,si);
-      });
+      };
+      // input(打鍵ごと)・change(確定)・blur(フォーカス外れ)すべてで保存。
+      // iPhoneで「打って別欄をタップ」してもinputが飛ばないケースをblur/changeで確実に拾う
+      inp.addEventListener("input",saveVal);
+      inp.addEventListener("change",saveVal);
+      inp.addEventListener("blur",saveVal);
     }else if(f==="memo"){
-      inp.addEventListener("input",function(){setMemo(inp.getAttribute("data-ex"),inp.value);});
+      var saveMemo=function(){setMemo(inp.getAttribute("data-ex"),inp.value);};
+      inp.addEventListener("input",saveMemo);
+      inp.addEventListener("change",saveMemo);
+      inp.addEventListener("blur",saveMemo);
     }else if(f==="endDate"){
       inp.addEventListener("change",function(){prog().endDate=inp.value;saveDB();render();});
     }else if(f==="dayTitle"){ inp.addEventListener("input",function(){updateDayInfo("title",inp.value);}); }
@@ -846,6 +853,8 @@ function bind(){
   // クリック系
   Array.prototype.forEach.call(root.querySelectorAll('[data-act]'),function(el){
     el.addEventListener("click",function(e){
+      // ★どのボタンを押すときも、入力中(フォーカス中)の値をまず確定保存する
+      flushActiveInput();
       var act=el.getAttribute("data-act");
       if(act==="closeModalBg"){ if(e.target===el){UI.modal=null;render();} return; }
       e.stopPropagation();
@@ -854,6 +863,30 @@ function bind(){
   });
   // モーダル内クリックの伝播止め
   Array.prototype.forEach.call(root.querySelectorAll('[data-stop]'),function(el){el.addEventListener("click",function(e){e.stopPropagation();});});
+}
+
+/* 画面内の全入力欄(重量・回数・メモ)の現在値を、保存処理に流し込んで確定させる。
+   「数字を打ってから確定せずにボタンを押した」ときの記録消失を防ぐ要。
+   フォーカス中の1欄だけでなく全欄を走査するので、複数欄に打った直後でも取りこぼさない。 */
+function flushActiveInput(){
+  try{
+    if(!root)return;
+    Array.prototype.forEach.call(root.querySelectorAll('input[data-field]'),function(inp){
+      var f=inp.getAttribute("data-field");
+      if(f==="weight"||f==="reps"){
+        var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
+        if(ex!=null&&!isNaN(si)){
+          var cur=getSet(ex,si);
+          // 画面の値とデータがズレている時だけ書き込む（無駄な保存を避ける）
+          if((""+inp.value)!==(""+cur[f])){var patch={};patch[f]=inp.value;writeSet(ex,si,patch);}
+        }
+      }else if(f==="memo"){
+        var exm=inp.getAttribute("data-ex");
+        if(exm!=null && inp.value!==getMemo(exm)) setMemo(exm,inp.value);
+      }
+    });
+    var a=document.activeElement; if(a&&a.blur&&a.getAttribute&&a.getAttribute("data-field"))a.blur();
+  }catch(e){}
 }
 
 function flashSaved(ex,si){
