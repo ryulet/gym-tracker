@@ -72,6 +72,7 @@
 
 /* ============================ 定数・初期データ ============================ */
 var STORAGE_KEY = "gym-tracker-wuwa-v4";   // メニュー刷新につき新キー
+var SNAP_PREFIX = STORAGE_KEY+"_snap_";     // 日次スナップショットのキー接頭辞（復旧用）
 var LEGACY_KEYS = ["gym-tracker-wuwa-v3","gym-tracker-wuwa-v2","gym-tracker-wuwa-v1"];
 
 /* 通常プログラム（復帰後・AC関節保護版／週4分割） */
@@ -289,10 +290,16 @@ function migrateLegacy(obj){
 }
 
 function loadDB(){
-  // 1) v4（現行）があればそれを使う
-  try{ var raw=localStorage.getItem(STORAGE_KEY); if(raw){var d=JSON.parse(raw); return normalizeDB(d);} }catch(e){}
-  // 2) v4が無い＝初回。古いバージョン(v3/v2/v1)を掃除して、最新メニューで作り直す。
-  //    （古いデータを自動で引き継ぐと旧メニューが復活してしまうため、ここでは引き継がない）
+  // 1) v4（現行）が正常に読めればそれを使う
+  try{
+    var raw=localStorage.getItem(STORAGE_KEY);
+    if(raw){ var d=JSON.parse(raw); if(d&&d.programs) return normalizeDB(d); }
+  }catch(e){}
+  // 2) 本体が無い/壊れている → いきなり初期化せず、まずバックアップから復旧を試みる
+  //    （iOSがストレージを消した/本体JSONが破損した場合でも、過去記録を救出できる）
+  var rec=recoverDB();
+  if(rec){ return rec; }
+  // 3) 復旧先も無い＝本当の初回。古いバージョンを掃除して最新メニューで作り直す。
   cleanupLegacy();
   var s=seedDB(); saveDB(s); return s;
 }
@@ -320,12 +327,52 @@ var saveOK = true;
 function saveDB(d){
   d = d||DB;
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
+    var json=JSON.stringify(d);
+    localStorage.setItem(STORAGE_KEY, json);
     // 保存検証：書いた内容を読み直して一致を確認（記録消失バグの再発防止）
     var back = localStorage.getItem(STORAGE_KEY);
-    saveOK = (back && back.length>0);
+    saveOK = (back && back.length>0 && back===json);
+    // ★ミラー：本体が壊れた/消えた時の即時復旧用（常に同じ内容を二重書き）
+    try{ localStorage.setItem(STORAGE_KEY+"_mirror", json); }catch(e){}
+    // ★日次スナップショット：1日1つ、最大5世代残す（過去消失時に巻き戻せる保険）
+    try{ saveDailySnapshot(json); }catch(e){}
   }catch(e){ saveOK=false; }
   return saveOK;
+}
+
+/* 日次スナップショット：キー = SNAP_PREFIX + 日付。古いものは5世代だけ残す。 */
+function saveDailySnapshot(json){
+  var today=todayStr();
+  localStorage.setItem(SNAP_PREFIX+today, json);
+  // 世代整理：snapキーを集めて、新しい順に5個だけ残す
+  var snaps=[];
+  for(var i=0;i<localStorage.length;i++){
+    var k=localStorage.key(i);
+    if(k && k.indexOf(SNAP_PREFIX)===0) snaps.push(k);
+  }
+  snaps.sort(); // 日付昇順（YYYY-MM-DD）
+  while(snaps.length>5){ var old=snaps.shift(); try{localStorage.removeItem(old);}catch(e){} }
+}
+
+/* 復旧：本体が読めない/壊れている時に、ミラー→最新スナップの順で救出する。 */
+function recoverDB(){
+  // 1) ミラー
+  try{
+    var mir=localStorage.getItem(STORAGE_KEY+"_mirror");
+    if(mir){ var dm=JSON.parse(mir); if(dm&&dm.programs){ localStorage.setItem(STORAGE_KEY,mir); return normalizeDB(dm); } }
+  }catch(e){}
+  // 2) 最新の日次スナップショット
+  try{
+    var snaps=[];
+    for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&k.indexOf(SNAP_PREFIX)===0)snaps.push(k);}
+    snaps.sort();
+    if(snaps.length){
+      var latest=localStorage.getItem(snaps[snaps.length-1]);
+      var ds=JSON.parse(latest);
+      if(ds&&ds.programs){ localStorage.setItem(STORAGE_KEY,latest); return normalizeDB(ds); }
+    }
+  }catch(e){}
+  return null;
 }
 
 /* ============================ アクティブ参照ヘルパー ============================ */
@@ -427,6 +474,18 @@ function removeProgram(pid){if(Object.keys(DB.programs).length<=1)return;delete 
 
 /* メニュー差し替え：JSON文字列で現プログラムのメニューを上書き（記録は保持）。
    受け付ける形：{"1":{title,subtitle,exercises:[...]},...}  または  {menu:{...}} でも可 */
+/* 種目名から安定した一意idを作る。同じ名前なら常に同じidになるので、
+   メニュー差し替えで並びが変わっても記録が正しく紐づく（記録取り違え防止）。
+   日本語も扱えるよう簡易ハッシュを使う。同名が同Dayに複数あれば連番で分ける。 */
+function hashStr(s){var h=5381;for(var i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0;}return h.toString(36);}
+function stableExId(dayKey,name,usedIds){
+  var base="d"+dayKey+"_"+hashStr(String(name||"noname"));
+  var id=base, n=2;
+  while(usedIds[id]){ id=base+"_"+n; n++; }
+  usedIds[id]=true;
+  return id;
+}
+
 function replaceMenuFromJSON(raw){
   var obj;
   try{obj=JSON.parse(raw);}catch(e){return {ok:false,msg:"読み取れなかった。{ } で始まるメニューJSONをそのまま貼ってね。"};}
@@ -434,18 +493,24 @@ function replaceMenuFromJSON(raw){
   var keys = Object.keys(m);
   if(!keys.length) return {ok:false,msg:"Dayが見つからなかった。形式を確認してね。"};
   // 妥当性チェック＆id自動補完
+  // ★重要：idは「位置」ではなく「種目名」から安定生成する。
+  //   位置ベース(d1e1…)だと、差し替えで並びが変わったとき過去記録が別種目に化ける（記録取り違えバグの原因）。
+  //   同じ種目名なら常に同じidになるので、並びが変わっても記録が正しく紐づく。
   var clean={};
+  var usedIds={};
   for(var ki=0;ki<keys.length;ki++){
     var dk=keys[ki];
     var day=m[dk];
     if(!day||!Array.isArray(day.exercises)) return {ok:false,msg:"Day"+dk+" に exercises 配列が無いみたい。"};
     var exs=day.exercises.map(function(ex,i){
+      var eid = ex.id ? String(ex.id) : stableExId(dk, ex.name, usedIds);
       return {
-        id: ex.id || ("d"+dk+"e"+(i+1)),
+        id: eid,
         name: String(ex.name||"種目"+(i+1)),
         target: String(ex.target||""),
         sets: (typeof ex.sets==="number"&&ex.sets>0)?ex.sets:3,
         warmup: !!ex.warmup,
+        rest: (typeof ex.rest==="number"&&ex.rest>0)?ex.rest:undefined,
         note: ex.note?String(ex.note):undefined
       };
     });
@@ -473,24 +538,25 @@ function exportToday(){
   var any=false; var rested=[];
   dm.exercises.forEach(function(ex){
     if(isSkipped(ex.id)){ rested.push(ex.name); return; }
+    var nS=setCountFor(ex);
+    // この種目を「今日やった」とみなすか：どれか1セットでも入力or完了✓があれば true
+    var touched=false;
+    for(var t2=0;t2<nS;t2++){var sdt=s.sets[ex.id+"_s"+t2];if(sdt&&(sdt.weight!==""||sdt.reps!==""||sdt.done)){touched=true;break;}}
+    if(!touched) return; // 一切触っていない種目はコピーに出さない
     var lines=[];
-    for(var i=0;i<setCountFor(ex);i++){
-      var sd=s.sets[ex.id+"_s"+i];
-      if(!sd) continue;
+    for(var i=0;i<nS;i++){
+      var sd=s.sets[ex.id+"_s"+i]||{weight:"",reps:"",done:false};
       var hasInput=(sd.weight!=="" || sd.reps!=="");
-      // 数字が入っている、または「完了✓」が押されていれば出力対象
-      if(hasInput || sd.done){
-        var w=sd.weight, r=sd.reps;
-        // 完了✓だけで数字が空のときは、前回値で補完（「前回と同じ」を表現）
-        var filledFromPrev=false;
-        if(sd.done && !hasInput){
-          var pv=prevSet(UI.day,ex.id,i);
-          if(pv){ w=pv.weight; r=pv.reps; filledFromPrev=true; }
-        }
-        var wd=(w!==""&&w!=null)?w:"—";
-        var rd=(r!==""&&r!=null)?r:"—";
-        lines.push("  Set"+(i+1)+": "+wd+"kg × "+rd+"回"+(sd.done?" ✓":"")+(filledFromPrev?"（前回と同じ）":""));
+      var w=sd.weight, r=sd.reps;
+      var filledFromPrev=false;
+      // 数字が空なら前回値で補完（✓だけの日も、未入力のまま送る日も「前回と同じ」で埋める）
+      if(!hasInput){
+        var pv=prevSet(UI.day,ex.id,i);
+        if(pv && (pv.weight!==""||pv.reps!=="")){ w=pv.weight; r=pv.reps; filledFromPrev=true; }
       }
+      var wd=(w!==""&&w!=null)?w:"—";
+      var rd=(r!==""&&r!=null)?r:"—";
+      lines.push("  Set"+(i+1)+": "+wd+"kg × "+rd+"回"+(sd.done?" ✓":"")+(filledFromPrev?"（前回と同じ）":""));
     }
     if(lines.length){
       any=true;
