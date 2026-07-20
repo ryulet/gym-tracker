@@ -546,17 +546,17 @@ function exportToday(){
     var lines=[];
     for(var i=0;i<nS;i++){
       var sd=s.sets[ex.id+"_s"+i]||{weight:"",reps:"",done:false};
-      var hasInput=(sd.weight!=="" || sd.reps!=="");
       var w=sd.weight, r=sd.reps;
-      var filledFromPrev=false;
-      // 数字が空なら前回値で補完（✓だけの日も、未入力のまま送る日も「前回と同じ」で埋める）
-      if(!hasInput){
-        var pv=prevSet(UI.day,ex.id,i);
-        if(pv && (pv.weight!==""||pv.reps!=="")){ w=pv.weight; r=pv.reps; filledFromPrev=true; }
-      }
+      var pv=prevSet(UI.day,ex.id,i);
+      // ★kgと回数を「別々に」判定して補完する。
+      //   片方だけ入力しても、もう片方は前回値で埋める（—で飛ばさない）。
+      var wFromPrev=false, rFromPrev=false;
+      if((w===""||w==null) && pv && pv.weight!=="" && pv.weight!=null){ w=pv.weight; wFromPrev=true; }
+      if((r===""||r==null) && pv && pv.reps!==""   && pv.reps!=null){   r=pv.reps;   rFromPrev=true; }
       var wd=(w!==""&&w!=null)?w:"—";
       var rd=(r!==""&&r!=null)?r:"—";
-      lines.push("  Set"+(i+1)+": "+wd+"kg × "+rd+"回"+(sd.done?" ✓":"")+(filledFromPrev?"（前回と同じ）":""));
+      var prevTag=(wFromPrev||rFromPrev)?"（前回と同じ）":"";
+      lines.push("  Set"+(i+1)+": "+wd+"kg × "+rd+"回"+(sd.done?" ✓":"")+prevTag);
     }
     if(lines.length){
       any=true;
