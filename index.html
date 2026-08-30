@@ -903,17 +903,22 @@ function bind(){
   Array.prototype.forEach.call(root.querySelectorAll('input[data-field]'),function(inp){
     var f=inp.getAttribute("data-field");
     if(f==="weight"||f==="reps"){
-      var saveVal=function(){
+      // input: 実際のキー操作。空にした場合もユーザー意図なので反映。
+      var saveOnInput=function(){
         var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
         var patch={};patch[f]=inp.value;writeSet(ex,si,patch);
-        flashSaved(ex,si);
-        markFilled(ex,si);
+        flashSaved(ex,si);markFilled(ex,si);
       };
-      // input(打鍵ごと)・change(確定)・blur(フォーカス外れ)すべてで保存。
-      // iPhoneで「打って別欄をタップ」してもinputが飛ばないケースをblur/changeで確実に拾う
-      inp.addEventListener("input",saveVal);
-      inp.addEventListener("change",saveVal);
-      inp.addEventListener("blur",saveVal);
+      // blur/change: フォーカス外れ等。★空値では絶対に上書きしない（勝手な消失を防ぐ）。
+      var saveOnBlur=function(){
+        if(inp.value==="")return;               // 空なら何もしない＝既存値を守る
+        var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
+        var patch={};patch[f]=inp.value;writeSet(ex,si,patch);
+        flashSaved(ex,si);markFilled(ex,si);
+      };
+      inp.addEventListener("input",saveOnInput);
+      inp.addEventListener("change",saveOnBlur);
+      inp.addEventListener("blur",saveOnBlur);
     }else if(f==="memo"){
       var saveMemo=function(){setMemo(inp.getAttribute("data-ex"),inp.value);};
       inp.addEventListener("input",saveMemo);
@@ -952,9 +957,12 @@ function flushActiveInput(){
       if(f==="weight"||f==="reps"){
         var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
         if(ex!=null&&!isNaN(si)){
-          var cur=getSet(ex,si);
-          // 画面の値とデータがズレている時だけ書き込む（無駄な保存を避ける）
-          if((""+inp.value)!==(""+cur[f])){var patch={};patch[f]=inp.value;writeSet(ex,si,patch);}
+          // ★空値では書き込まない。画面に値がある時だけ、データと違えば保存する。
+          //   （renderで作られた空欄が既存の記録を空で潰すのを防ぐ）
+          if(inp.value!==""){
+            var cur=getSet(ex,si);
+            if((""+inp.value)!==(""+cur[f])){var patch={};patch[f]=inp.value;writeSet(ex,si,patch);}
+          }
         }
       }else if(f==="memo"){
         var exm=inp.getAttribute("data-ex");
