@@ -433,6 +433,37 @@ function logSetChange(exId,si,before,after,via){
   }catch(e){}
 }
 function clearLog(){ try{ localStorage.removeItem(LOG_KEY); }catch(e){} }
+
+/* データ診断：今のプログラムに何が保存されているかを読みやすくまとめる（原因調査用） */
+function exportDiag(){
+  var pr=prog(); var idName={};
+  var t="FORGE データ診断\nプログラム: "+pr.name+"\n\n■メニュー\n";
+  Object.keys(pr.menu).sort(function(a,b){return a-b;}).forEach(function(dk){
+    var d=pr.menu[dk];
+    t+="Day"+dk+": "+(d.exercises||[]).map(function(ex){idName[ex.id]=ex.name;return ex.name;}).join(" / ")+"\n";
+  });
+  t+="\n■記録（新しい順・最大15日）\n";
+  var ss=pr.sessions||{};
+  var keys=Object.keys(ss).sort(function(a,b){var da=String(ss[a].date||""),db=String(ss[b].date||"");return da<db?1:(da>db?-1:0);}).slice(0,15);
+  var orphan={};
+  keys.forEach(function(k){
+    var s=ss[k]; if(!s||!s.sets)return;
+    t+=formatDate(s.date)+" Day"+s.day+"\n";
+    var byId={};
+    Object.keys(s.sets).forEach(function(sk){var m=/^(.*)_s(\d+)$/.exec(sk);if(!m)return;(byId[m[1]]=byId[m[1]]||[])[+m[2]]=s.sets[sk];});
+    Object.keys(byId).forEach(function(id){
+      var arr=byId[id],vals=[];
+      for(var i=0;i<arr.length;i++){var v=arr[i];if(v)vals.push((v.weight||"—")+"×"+(v.reps||"—")+(v.done?"✓":""));}
+      if(idName[id]) t+="  "+idName[id]+(s.skipped&&s.skipped[id]?"（休）":"")+": "+vals.join(" ")+"\n";
+      else orphan[id]=true;
+    });
+  });
+  var o=Object.keys(orphan);
+  t+="\n■今のメニューに紐づいていない記録ID（引き継ぎ済みの旧IDも含む）\n"+(o.length?o.join(", "):"なし")+"\n";
+  return t;
+}
+/* 全データ書き出し（バックアップ兼・調査用）。「記録のインポート」でそのまま取り込める形。 */
+function exportAllData(){var pr=prog();return JSON.stringify({name:pr.name,menu:pr.menu,sessions:pr.sessions,memos:pr.memos,endDate:pr.endDate});}
 function exportLog(){
   var arr=readLog();
   if(!arr.length) return "ログはまだ空だよ。";
@@ -523,13 +554,37 @@ function toggleSkip(exId){
   saveDB();
 }
 
+/* 前回の記録：Dayをまたいで「その種目を最後にやった日」を探す（今のセッションは除く）。
+   メニューを組み直して種目が別のDayに移っても、前回が追える。 */
+function hasExData(ss,exId){
+  if(!ss||!ss.sets)return false;
+  if(ss.skipped&&ss.skipped[exId])return false;
+  var pre=exId+"_s";
+  for(var k in ss.sets){
+    if(k.indexOf(pre)===0 && /^\d+$/.test(k.slice(pre.length))){
+      var v=ss.sets[k];
+      if(v&&((v.weight!==""&&v.weight!=null)||(v.reps!==""&&v.reps!=null)||v.done))return true;
+    }
+  }
+  return false;
+}
+function prevRecord(exId){
+  var cur=sessKey(), best=null;
+  Object.keys(sessions()).forEach(function(k){
+    if(k===cur)return;
+    var ss=sessions()[k];
+    if(!hasExData(ss,exId))return;
+    if(!best || String(ss.date||"")>String(best.date||""))best=ss;
+  });
+  return best;
+}
 function prevSession(dn){
   var t=todayStr();
   var keys=Object.keys(sessions()).filter(function(k){return k.indexOf("day"+dn+"_")===0 && k!=="day"+dn+"_"+t;}).sort().reverse();
   return keys.length?sessions()[keys[0]]:null;
 }
-function prevSet(dn,exId,si){var p=prevSession(dn);return p?(p.sets[exId+"_s"+si]||null):null;}
-function prevDate(dn){var p=prevSession(dn);return p?p.date:null;}
+function prevSet(dn,exId,si){var p=prevRecord(exId);return p?(p.sets[exId+"_s"+si]||null):null;}
+function prevDate(dn,exId){if(exId){var p=prevRecord(exId);return p?p.date:null;}var q=prevSession(dn);return q?q.date:null;}
 function lastDate(dn){var keys=Object.keys(sessions()).filter(function(k){return k.indexOf("day"+dn+"_")===0;}).sort().reverse();return keys.length?sessions()[keys[0]].date:null;}
 function history(dn){return Object.keys(sessions()).filter(function(k){return k.indexOf("day"+dn+"_")===0;}).sort().reverse().map(function(k){return sessions()[k];});}
 
@@ -540,7 +595,7 @@ function getMemo(exId){return memos()[sessKey()+"_"+exId]||"";}
 function setMemo(exId,v){memos()[sessKey()+"_"+exId]=v;saveDB();}
 
 /* メニュー編集 */
-function addExercise(name,target,warmup){if(!name.trim())return;var m=menu();m[UI.day].exercises.push({id:genExId(),name:name.trim(),target:target.trim(),sets:3,warmup:!!warmup});saveDB();}
+function addExercise(name,target,warmup){if(!name.trim())return;var list=menu()[UI.day].exercises;var nm=nameKey(name);var b=nameBaseId(nm),id=b,n=2,used={};list.forEach(function(e){used[e.id]=true;});while(used[id]){id=b+"_"+n;n++;}list.push({id:id,name:nm,target:target.trim(),sets:3,warmup:!!warmup});saveDB();}
 function removeExercise(exId){var d=menu()[UI.day];d.exercises=d.exercises.filter(function(e){return e.id!==exId;});saveDB();}
 function moveExercise(idx,dir){var a=menu()[UI.day].exercises;var ni=idx+dir;if(ni<0||ni>=a.length)return;var t=a[idx];a[idx]=a[ni];a[ni]=t;saveDB();}
 function setExSets(exId,n){var d=menu()[UI.day];d.exercises.forEach(function(e){if(e.id===exId)e.sets=Math.max(1,Math.min(9,n));});saveDB();}
@@ -554,101 +609,140 @@ function addProgram(name,fromMenu){var pid=genPid();DB.programs[pid]=freshProgra
 function renameProgram(pid,name){if(DB.programs[pid])DB.programs[pid].name=name;saveDB();}
 function removeProgram(pid){if(Object.keys(DB.programs).length<=1)return;delete DB.programs[pid];if(DB.activePid===pid)DB.activePid=Object.keys(DB.programs)[0];UI.day=null;saveDB();ensureDay();}
 
-/* メニュー差し替え：JSON文字列で現プログラムのメニューを上書き（記録は保持）。
-   受け付ける形：{"1":{title,subtitle,exercises:[...]},...}  または  {menu:{...}} でも可 */
-/* 種目名から安定した一意idを作る。同じ名前なら常に同じidになるので、
-   メニュー差し替えで並びが変わっても記録が正しく紐づく（記録取り違え防止）。
-   日本語も扱えるよう簡易ハッシュを使う。同名が同Dayに複数あれば連番で分ける。 */
+/* ============================ 種目ID（種目名ベース） ============================
+   記録は「種目ID」に紐づく。IDは必ず「種目名」から作る（JSONに書かれたidは使わない）。
+   ・位置ベース(d2e3)だと、メニューの並びが変わると記録が別の種目に化ける
+   ・Day番号入りだと、種目が別のDayに移ると記録に届かなくなる
+   → 名前だけで決めれば、並び替えてもDayを移っても、同じ種目の記録を追い続けられる。
+   同じDayに同名が複数あるときだけ _2, _3 を付ける。 */
 function hashStr(s){var h=5381;for(var i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0;}return h.toString(36);}
-function stableExId(dayKey,name,usedIds){
-  // ★idにDay番号を含めない。含めると、メニュー差し替えで種目が別のDayに移ったとき
-  //   idが変わって過去の記録に届かなくなる（記録が消えたように見える）。
-  //   同じ種目名なら全Dayで同じid。記録はセッションキー(day番号_日付)でDay別に
-  //   分かれて保存されるので、Dayをまたいでも記録が混ざることはない。
-  return "ex_"+hashStr(String(name||"noname"));
+function nameKey(name){return String(name==null?"":name).trim();}
+function nameBaseId(name){return "ex_"+hashStr(nameKey(name)||"noname");}
+function isNameIdFor(id,name){var b=nameBaseId(name);id=String(id||"");return id===b || (id.indexOf(b+"_")===0 && /^\d+$/.test(id.slice(b.length+1)));}
+/* 1日分の種目リストに名前ベースのIDを振る（同名は _2,_3） */
+function dayIdsFor(exs){var seen={};return exs.map(function(ex){var b=nameBaseId(ex&&ex.name);seen[b]=(seen[b]||0)+1;return seen[b]===1?b:b+"_"+seen[b];});}
+function stableExId(dayKey,name){return nameBaseId(name);} // 互換用
+
+/* 旧IDの記録を新IDへコピー（旧キーは消さない＝安全側）。新側に値があれば上書きしない。 */
+function copyExData(pr,oldId,newId){
+  if(!pr||!oldId||!newId||oldId===newId)return false;
+  var changed=false, pre=oldId+"_s";
+  Object.keys(pr.sessions||{}).forEach(function(sk){
+    var ss=pr.sessions[sk]; if(!ss)return;
+    if(ss.sets){
+      Object.keys(ss.sets).forEach(function(k){
+        if(k.indexOf(pre)===0){
+          var tail=k.slice(pre.length);
+          if(/^\d+$/.test(tail)){
+            var nk=newId+"_s"+tail;
+            if(ss.sets[nk]===undefined){ss.sets[nk]=ss.sets[k];changed=true;}
+          }
+        }
+      });
+    }
+    if(ss.skipped && ss.skipped[oldId]!==undefined && ss.skipped[newId]===undefined){ss.skipped[newId]=ss.skipped[oldId];changed=true;}
+    if(ss.extraSets && ss.extraSets[oldId]!==undefined && ss.extraSets[newId]===undefined){ss.extraSets[newId]=ss.extraSets[oldId];changed=true;}
+  });
+  if(pr.memos){
+    var suf="_"+oldId;
+    Object.keys(pr.memos).forEach(function(mk){
+      if(mk.length>suf.length && mk.slice(-suf.length)===suf){
+        var nmk=mk.slice(0,-suf.length)+"_"+newId;
+        if(pr.memos[nmk]===undefined){pr.memos[nmk]=pr.memos[mk];changed=true;}
+      }
+    });
+  }
+  return changed;
 }
 
-/* 旧id（d1_ハッシュ 形式＝Day番号入り）で保存された記録を、
-   新id（ex_ハッシュ＝種目名のみ）へ引き継ぐ。Day移動で見えなくなった記録を救済する。
-   一度だけ実行し、元データは消さずに新idへコピーする（安全側）。 */
-function migrateExIds(){
+/* 1プログラムのメニューIDを名前ベースに揃える。旧IDの記録は新IDへ引き継ぐ。 */
+function reconcileProgram(pr){
+  if(!pr||!pr.menu)return false;
+  if(!pr.sessions)pr.sessions={};
+  var changed=false;
+  Object.keys(pr.menu).forEach(function(dk){
+    var d=pr.menu[dk]; if(!d||!Array.isArray(d.exercises))return;
+    var used={};
+    d.exercises.forEach(function(ex){ if(ex && isNameIdFor(ex.id,ex.name)) used[ex.id]=true; });
+    d.exercises.forEach(function(ex){
+      if(!ex||isNameIdFor(ex.id,ex.name))return;
+      var b=nameBaseId(ex.name), target=b, n=2;
+      while(used[target]){target=b+"_"+n;n++;}
+      used[target]=true;
+      copyExData(pr,ex.id,target);
+      ex.id=target; changed=true;
+    });
+  });
+  return changed;
+}
+
+/* 旧版の「名前ハッシュ入りID」(d1_xxxx / ex_xxxx)で残っている迷子の記録を、
+   今のメニューの同じ名前の種目へ引き継ぐ（Day移動で見えなくなった記録の救済）。 */
+function rescueOrphans(pr){
+  if(!pr||!pr.menu||!pr.sessions)return false;
+  var current={}, hashToId={};
+  Object.keys(pr.menu).forEach(function(dk){
+    var d=pr.menu[dk]; if(!d||!d.exercises)return;
+    d.exercises.forEach(function(ex){
+      if(!ex)return; current[ex.id]=true;
+      var h1=hashStr(String(ex.name||"noname")), h2=hashStr(nameKey(ex.name)||"noname");
+      if(!hashToId[h1])hashToId[h1]=nameBaseId(ex.name);
+      if(!hashToId[h2])hashToId[h2]=nameBaseId(ex.name);
+    });
+  });
+  var orphan={};
+  Object.keys(pr.sessions).forEach(function(sk){
+    var ss=pr.sessions[sk]; if(!ss||!ss.sets)return;
+    Object.keys(ss.sets).forEach(function(k){var id=k.replace(/_s\d+$/,"");if(!current[id])orphan[id]=true;});
+  });
+  var changed=false;
+  Object.keys(orphan).forEach(function(oid){
+    var mm=/^(?:d\d+|ex)_([0-9a-z]+)(?:_(\d+))?$/.exec(oid);
+    if(!mm)return;
+    var target=hashToId[mm[1]]; if(!target)return;
+    if(mm[2] && current[target+"_"+mm[2]]) target=target+"_"+mm[2];
+    if(copyExData(pr,oid,target))changed=true;
+  });
+  return changed;
+}
+
+/* 起動時・インポート後などに呼ぶ。何度呼んでも安全。 */
+function reconcileIds(){
   try{
-    if(DB._exIdMigrated) return;
     var changed=false;
     Object.keys(DB.programs).forEach(function(pid){
       var pr=DB.programs[pid];
-      if(!pr||!pr.menu||!pr.sessions) return;
-      // 現メニューの「種目名→新id」対応表を作る
-      var nameToNew={};
-      Object.keys(pr.menu).forEach(function(dk){
-        var d=pr.menu[dk]; if(!d||!d.exercises)return;
-        d.exercises.forEach(function(ex){
-          if(ex&&ex.name) nameToNew[ex.name]="ex_"+hashStr(String(ex.name));
-        });
-      });
-      // メニュー側のidを新idへ（ユーザー独自idはそのまま残す）
-      Object.keys(pr.menu).forEach(function(dk){
-        var d=pr.menu[dk]; if(!d||!d.exercises)return;
-        d.exercises.forEach(function(ex){
-          if(!ex||!ex.name)return;
-          var nid=nameToNew[ex.name];
-          if(nid && ex.id!==nid && /^d\d+_/.test(String(ex.id||""))){
-            // 旧id形式(d1_xxx)のときだけ張り替える
-            var oldId=ex.id;
-            ex.id=nid; changed=true;
-            // セッション内のキーもコピー（旧キーは残す＝安全側）
-            Object.keys(pr.sessions).forEach(function(sk){
-              var ss=pr.sessions[sk]; if(!ss||!ss.sets)return;
-              Object.keys(ss.sets).forEach(function(k){
-                var pre=oldId+"_s";
-                if(k.indexOf(pre)===0){
-                  var tail=k.slice(pre.length);
-                  var nk=nid+"_s"+tail;
-                  if(ss.sets[nk]===undefined) ss.sets[nk]=ss.sets[k];
-                }
-              });
-              if(ss.skipped && ss.skipped[oldId]!==undefined && ss.skipped[nid]===undefined){ ss.skipped[nid]=ss.skipped[oldId]; }
-              if(ss.extraSets && ss.extraSets[oldId]!==undefined && ss.extraSets[nid]===undefined){ ss.extraSets[nid]=ss.extraSets[oldId]; }
-            });
-            // メモのキーもコピー
-            if(pr.memos){
-              Object.keys(pr.memos).forEach(function(mk){
-                if(mk.indexOf("_"+oldId)>=0){
-                  var nmk=mk.replace("_"+oldId,"_"+nid);
-                  if(pr.memos[nmk]===undefined) pr.memos[nmk]=pr.memos[mk];
-                }
-              });
-            }
-          }
-        });
-      });
+      if(reconcileProgram(pr))changed=true;
+      if(rescueOrphans(pr))changed=true;
     });
-    DB._exIdMigrated=true;
-    saveDB();
+    if(changed)saveDB();
   }catch(e){}
 }
+function migrateExIds(){reconcileIds();} // 互換用
 
+/* メニュー差し替え：JSON文字列で現プログラムのメニューを上書き（記録は保持）。
+   受け付ける形：{"1":{title,subtitle,exercises:[...]},...}  または  {menu:{...}} でも可
+   ★JSONに id が書いてあっても使わない。IDは必ず種目名から作る。 */
 function replaceMenuFromJSON(raw){
   var obj;
   try{obj=JSON.parse(raw);}catch(e){return {ok:false,msg:"読み取れなかった。{ } で始まるメニューJSONをそのまま貼ってね。"};}
-  var m = obj.menu ? obj.menu : obj;          // {menu:{...}} でも素の {...} でも受ける
+  var m = obj.menu ? obj.menu : obj;
   var keys = Object.keys(m);
   if(!keys.length) return {ok:false,msg:"Dayが見つからなかった。形式を確認してね。"};
-  // 妥当性チェック＆id自動補完
-  // ★重要：idは「位置」ではなく「種目名」から安定生成する。
-  //   位置ベース(d1e1…)だと、差し替えで並びが変わったとき過去記録が別種目に化ける（記録取り違えバグの原因）。
-  //   同じ種目名なら常に同じidになるので、並びが変わっても記録が正しく紐づく。
+  // 差し替え前に、今のメニューを名前ベースIDに揃えて記録を引き継いでおく
+  reconcileProgram(prog());
   var clean={};
-  var usedIds={};
   for(var ki=0;ki<keys.length;ki++){
     var dk=keys[ki];
     var day=m[dk];
     if(!day||!Array.isArray(day.exercises)) return {ok:false,msg:"Day"+dk+" に exercises 配列が無いみたい。"};
+    var named=day.exercises.map(function(ex,i){return {name:nameKey((ex&&ex.name)||("種目"+(i+1)))};});
+    var ids=dayIdsFor(named);
     var exs=day.exercises.map(function(ex,i){
-      var eid = ex.id ? String(ex.id) : stableExId(dk, ex.name, usedIds);
+      ex=ex||{};
       return {
-        id: eid,
-        name: String(ex.name||"種目"+(i+1)),
+        id: ids[i],
+        name: named[i].name,
         target: String(ex.target||""),
         sets: (typeof ex.sets==="number"&&ex.sets>0)?ex.sets:3,
         warmup: !!ex.warmup,
@@ -659,11 +753,11 @@ function replaceMenuFromJSON(raw){
     clean[dk]={title:String(day.title||("Day "+dk)),subtitle:String(day.subtitle||"カスタム"),exercises:exs};
   }
   prog().menu = clean;
-  // 差し替え後、消えたDayにUIが取り残されないように
+  rescueOrphans(prog());
   UI.day=null;
   saveDB();
   ensureDay();
-  return {ok:true,msg:"メニューを差し替えたよ（"+keys.length+"日分）。記録はそのまま残ってる。"};
+  return {ok:true,msg:"メニューを差し替えたよ（"+keys.length+"日分）。記録は種目名で引き継がれるよ。"};
 }
 
 function clearToday(){
@@ -848,7 +942,7 @@ function renderWorkout(){
         return;
       }
       // 前回バナー
-      var pd=prevDate(UI.day);
+      var pd=prevDate(UI.day,ex.id);
       if(pd){
         var ps=[];for(var j=0;j<nSets;j++){var pp=prevSet(UI.day,ex.id,j);if(pp)ps.push(pp);}
         if(ps.length){
@@ -1022,6 +1116,11 @@ function renderModal(){
     h+='<div style="display:flex;gap:8px">';
     h+='<button data-act="copyLog" style="flex:2;padding:10px;border-radius:10px;border:1px solid var(--secondary);background:rgba(74,158,173,.1);color:var(--secondary);font-size:12px;font-weight:700">ログをコピー</button>';
     h+='<button data-act="clearLog" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:700">消去</button>';
+    h+='</div>';
+    h+='<div style="font-size:10px;color:var(--muted);margin:12px 0 8px">過去の記録が「今どう保存されているか」を丸ごと確認できるよ。消えた記録があったら、これもコピーして見せて。</div>';
+    h+='<div style="display:flex;gap:8px">';
+    h+='<button data-act="copyDiag" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--secondary);background:rgba(74,158,173,.1);color:var(--secondary);font-size:12px;font-weight:700">データ診断をコピー</button>';
+    h+='<button data-act="exportAll" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--glass);color:var(--sub);font-size:12px;font-weight:700">全データを書き出す</button>';
     h+='</div></div>';
     h+='<div style="border-top:1px solid var(--borderLight);margin-top:18px;padding-top:16px">';
     h+='<button data-act="doFullReset" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(192,57,43,.3);background:var(--dangerBg);color:var(--danger);font-size:11px;font-weight:700">⟲ 最新メニューに初期化（困ったとき用・記録は消える）</button>';
@@ -1178,6 +1277,8 @@ function handle(act,el){
     case "addProgBlank": addProgram("新しいプログラム",{1:{title:"Day 1",subtitle:"カスタム",exercises:[]}}); UI.modal=null; render(); break;
     case "addProgCopy": addProgram(prog().name+" のコピー", deepCopy(menu())); UI.modal=null; render(); break;
     case "delProg": if(confirm("プログラム「"+el.getAttribute("data-name")+"」を削除する？記録も消えるよ。")){removeProgram(el.getAttribute("data-pid"));render();} break;
+    case "copyDiag": copyText(exportDiag(),el); break;
+    case "exportAll": copyText(exportAllData(),el); break;
     case "copyLog":
       copyText(exportLog(),el);
       break;
@@ -1214,7 +1315,7 @@ function doFullReset(){
   if(!confirm("全データをリセットして、最新メニュー（AC関節期＋通常）の初期状態に戻す？\n今ある記録は消えるよ。"))return;
   cleanupLegacy();
   try{ localStorage.removeItem(STORAGE_KEY); }catch(e){}
-  DB = seedDB(); saveDB(DB);
+  DB = seedDB(); saveDB(DB); reconcileIds();
   UI.day=null; UI.view="workout"; UI.expanded=null; UI.modal=null;
   ensureDay();
   alert("最新の状態にリセットしたよ。");
@@ -1237,13 +1338,14 @@ function doImport(){
     endDate: obj.endDate||""
   };
   saveDB();
+  reconcileIds();
   var n=Object.keys(obj.sessions||{}).length;
   alert("取り込み完了！「取り込んだ記録」プログラムを追加したよ（記録 "+n+" 件）。名前は管理画面で変えられる。");
   render();
 }
 
 /* ============================ 起動 ============================ */
-migrateExIds();
+reconcileIds();
 render();
 </script>
 </body>
