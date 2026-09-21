@@ -389,17 +389,99 @@ function ensureDay(){ if(UI.day==null||!menu()[UI.day]){UI.day=firstDayKey();} }
 /* セッション・セット操作（すべてアクティブプログラム内に閉じる） */
 function sessKey(){return "day"+UI.day+"_"+todayStr();}
 function getSet(exId,si){var s=sessions()[sessKey()];if(!s)return {weight:"",reps:"",done:false};return s.sets[exId+"_s"+si]||{weight:"",reps:"",done:false};}
-function writeSet(exId,si,patch){
+/* ============================ 診断ログ ============================
+   記録が書き換わるたびに、何が起きたかを残す。
+   「値が入っていたのに空になった」ケースは LOST として強調する。
+   原因追跡用。使い勝手には影響しない。最新200件を保持。 */
+var LOG_KEY = STORAGE_KEY+"_difflog";
+function nowStamp(){
+  var d=new Date();
+  function z(n){return String(n).padStart(2,"0");}
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+z(d.getHours())+":"+z(d.getMinutes())+":"+z(d.getSeconds());
+}
+function readLog(){
+  try{ var raw=localStorage.getItem(LOG_KEY); return raw?JSON.parse(raw):[]; }catch(e){ return []; }
+}
+function pushLog(entry){
+  try{
+    var arr=readLog();
+    arr.push(entry);
+    if(arr.length>200) arr=arr.slice(arr.length-200);
+    localStorage.setItem(LOG_KEY, JSON.stringify(arr));
+  }catch(e){}
+}
+function logSetChange(exId,si,before,after,via){
+  try{
+    var exName=exId;
+    try{
+      var d=menu()[UI.day];
+      if(d&&d.exercises){d.exercises.forEach(function(e){if(e.id===exId)exName=e.name;});}
+    }catch(e2){}
+    var lostW = (before.weight!=="" && before.weight!=null) && (after.weight===""||after.weight==null);
+    var lostR = (before.reps!==""   && before.reps!=null)   && (after.reps===""  ||after.reps==null);
+    var lost = lostW||lostR;
+    pushLog({
+      t: nowStamp(),
+      day: UI.day,
+      ex: exName,
+      set: si+1,
+      before: (before.weight||"—")+"kg×"+(before.reps||"—"),
+      after:  (after.weight||"—")+"kg×"+(after.reps||"—"),
+      via: via||"",
+      lost: lost ? (lostW&&lostR?"両方":(lostW?"kg":"回数")) : ""
+    });
+  }catch(e){}
+}
+function clearLog(){ try{ localStorage.removeItem(LOG_KEY); }catch(e){} }
+function exportLog(){
+  var arr=readLog();
+  if(!arr.length) return "ログはまだ空だよ。";
+  var t="FORGE 診断ログ（新しい順・最大200件）\n\n";
+  for(var i=arr.length-1;i>=0;i--){
+    var e=arr[i];
+    t+=(e.lost?"⚠LOST("+e.lost+") ":"")+e.t+" Day"+e.day+" "+e.ex+" Set"+e.set
+      +"  "+e.before+" → "+e.after+(e.via?"  ["+e.via+"]":"")+"\n";
+  }
+  return t;
+}
+
+function writeSet(exId,si,patch,via){
   var t=todayStr();var key=sessKey();
   var s=sessions()[key]||{date:t,day:UI.day,sets:{}};
   var k=exId+"_s"+si;
   var cur=s.sets[k]||{weight:"",reps:"",done:false};
-  s.sets[k]=Object.assign({},cur,patch);
+  var next=Object.assign({},cur,patch);
+
+  /* ★重要：片方だけ入力したとき、空のもう片方を「前回値」で自動的に埋める。
+     例）前回47kg×15。今日はkgそのままで回数だけ13に変えた
+        → kgは画面上グレーの参考表示なだけで実データは空 → 「—kg × 13回」になってしまう。
+     これを防ぐため、weight/repsのどちらかが入った時点で、空の方に前回値を入れて完全な記録にする。
+     （前回値が無ければ空のまま。ユーザーが明示的に消した場合は下の done 経由では埋めない） */
+  var touchedVal = (patch && (patch.weight!==undefined || patch.reps!==undefined));
+  var hasAny = (next.weight!=="" && next.weight!=null) || (next.reps!=="" && next.reps!=null);
+  // 値を入力した時（片方でも）、または完了✓を付けた時に、空の項目を前回値で埋める
+  if((touchedVal && hasAny) || patch.done===true){
+    var pv=prevSet(UI.day,exId,si);
+    if(pv){
+      // このpatchで「明示的に空にされた」項目は、ユーザーの削除意図なので埋め戻さない
+      var clearedW = (patch.weight==="");
+      var clearedR = (patch.reps==="");
+      if(!clearedW && (next.weight===""||next.weight==null) && pv.weight!=="" && pv.weight!=null) next.weight=pv.weight;
+      if(!clearedR && (next.reps===""||next.reps==null)   && pv.reps!==""   && pv.reps!=null)   next.reps=pv.reps;
+    }
+  }
+
+  // 変化があったときだけログを残す（値の消失は LOST として強調される）
+  if(cur.weight!==next.weight || cur.reps!==next.reps || cur.done!==next.done){
+    logSetChange(exId,si,cur,next,via);
+  }
+
+  s.sets[k]=next;
   s.date=t; s.day=UI.day;
   sessions()[key]=s;
   saveDB();
 }
-function toggleDone(exId,si){var sd=getSet(exId,si);writeSet(exId,si,{done:!sd.done});}
+function toggleDone(exId,si){var sd=getSet(exId,si);writeSet(exId,si,{done:!sd.done},"完了✓");}
 
 /* お休み（スキップ）：その日のその種目を「意図的に休む」と記録 */
 function isSkipped(exId){var s=sessions()[sessKey()];return !!(s&&s.skipped&&s.skipped[exId]);}
@@ -451,8 +533,8 @@ function prevDate(dn){var p=prevSession(dn);return p?p.date:null;}
 function lastDate(dn){var keys=Object.keys(sessions()).filter(function(k){return k.indexOf("day"+dn+"_")===0;}).sort().reverse();return keys.length?sessions()[keys[0]].date:null;}
 function history(dn){return Object.keys(sessions()).filter(function(k){return k.indexOf("day"+dn+"_")===0;}).sort().reverse().map(function(k){return sessions()[k];});}
 
-function fillFromPrev(exId,si){var p=prevSet(UI.day,exId,si);if(p)writeSet(exId,si,{weight:p.weight||"",reps:p.reps||""});}
-function fillAllFromPrev(exId,sets){for(var i=0;i<sets;i++){var p=prevSet(UI.day,exId,i);if(p)writeSet(exId,i,{weight:p.weight||"",reps:p.reps||""});}}
+function fillFromPrev(exId,si){var p=prevSet(UI.day,exId,si);if(p)writeSet(exId,si,{weight:p.weight||"",reps:p.reps||""},"前回コピー");}
+function fillAllFromPrev(exId,sets){for(var i=0;i<sets;i++){var p=prevSet(UI.day,exId,i);if(p)writeSet(exId,i,{weight:p.weight||"",reps:p.reps||""},"前回コピー");}}
 
 function getMemo(exId){return memos()[sessKey()+"_"+exId]||"";}
 function setMemo(exId,v){memos()[sessKey()+"_"+exId]=v;saveDB();}
@@ -479,11 +561,71 @@ function removeProgram(pid){if(Object.keys(DB.programs).length<=1)return;delete 
    日本語も扱えるよう簡易ハッシュを使う。同名が同Dayに複数あれば連番で分ける。 */
 function hashStr(s){var h=5381;for(var i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0;}return h.toString(36);}
 function stableExId(dayKey,name,usedIds){
-  var base="d"+dayKey+"_"+hashStr(String(name||"noname"));
-  var id=base, n=2;
-  while(usedIds[id]){ id=base+"_"+n; n++; }
-  usedIds[id]=true;
-  return id;
+  // ★idにDay番号を含めない。含めると、メニュー差し替えで種目が別のDayに移ったとき
+  //   idが変わって過去の記録に届かなくなる（記録が消えたように見える）。
+  //   同じ種目名なら全Dayで同じid。記録はセッションキー(day番号_日付)でDay別に
+  //   分かれて保存されるので、Dayをまたいでも記録が混ざることはない。
+  return "ex_"+hashStr(String(name||"noname"));
+}
+
+/* 旧id（d1_ハッシュ 形式＝Day番号入り）で保存された記録を、
+   新id（ex_ハッシュ＝種目名のみ）へ引き継ぐ。Day移動で見えなくなった記録を救済する。
+   一度だけ実行し、元データは消さずに新idへコピーする（安全側）。 */
+function migrateExIds(){
+  try{
+    if(DB._exIdMigrated) return;
+    var changed=false;
+    Object.keys(DB.programs).forEach(function(pid){
+      var pr=DB.programs[pid];
+      if(!pr||!pr.menu||!pr.sessions) return;
+      // 現メニューの「種目名→新id」対応表を作る
+      var nameToNew={};
+      Object.keys(pr.menu).forEach(function(dk){
+        var d=pr.menu[dk]; if(!d||!d.exercises)return;
+        d.exercises.forEach(function(ex){
+          if(ex&&ex.name) nameToNew[ex.name]="ex_"+hashStr(String(ex.name));
+        });
+      });
+      // メニュー側のidを新idへ（ユーザー独自idはそのまま残す）
+      Object.keys(pr.menu).forEach(function(dk){
+        var d=pr.menu[dk]; if(!d||!d.exercises)return;
+        d.exercises.forEach(function(ex){
+          if(!ex||!ex.name)return;
+          var nid=nameToNew[ex.name];
+          if(nid && ex.id!==nid && /^d\d+_/.test(String(ex.id||""))){
+            // 旧id形式(d1_xxx)のときだけ張り替える
+            var oldId=ex.id;
+            ex.id=nid; changed=true;
+            // セッション内のキーもコピー（旧キーは残す＝安全側）
+            Object.keys(pr.sessions).forEach(function(sk){
+              var ss=pr.sessions[sk]; if(!ss||!ss.sets)return;
+              Object.keys(ss.sets).forEach(function(k){
+                var pre=oldId+"_s";
+                if(k.indexOf(pre)===0){
+                  var tail=k.slice(pre.length);
+                  var nk=nid+"_s"+tail;
+                  if(ss.sets[nk]===undefined) ss.sets[nk]=ss.sets[k];
+                }
+              });
+              if(ss.skipped && ss.skipped[oldId]!==undefined && ss.skipped[nid]===undefined){ ss.skipped[nid]=ss.skipped[oldId]; }
+              if(ss.extraSets && ss.extraSets[oldId]!==undefined && ss.extraSets[nid]===undefined){ ss.extraSets[nid]=ss.extraSets[oldId]; }
+            });
+            // メモのキーもコピー
+            if(pr.memos){
+              Object.keys(pr.memos).forEach(function(mk){
+                if(mk.indexOf("_"+oldId)>=0){
+                  var nmk=mk.replace("_"+oldId,"_"+nid);
+                  if(pr.memos[nmk]===undefined) pr.memos[nmk]=pr.memos[mk];
+                }
+              });
+            }
+          }
+        });
+      });
+    });
+    DB._exIdMigrated=true;
+    saveDB();
+  }catch(e){}
 }
 
 function replaceMenuFromJSON(raw){
@@ -874,6 +1016,14 @@ function renderModal(){
     h+='<button data-act="doImport" style="margin-top:8px;width:100%;padding:10px;border-radius:10px;border:1px solid var(--secondary);background:rgba(74,158,173,.1);color:var(--secondary);font-size:12px;font-weight:700">この記録を新プログラムとして取り込む</button>';
     h+='</div>';
     h+='<div style="border-top:1px solid var(--borderLight);margin-top:18px;padding-top:16px">';
+    h+='<div style="border-top:1px solid var(--borderLight);margin-top:18px;padding-top:16px">';
+    h+='<div style="font-size:12px;font-weight:700;color:var(--sub);margin-bottom:8px">🔍 診断ログ（記録が消えたとき用）</div>';
+    h+='<div style="font-size:10px;color:var(--muted);margin-bottom:8px">記録が書き換わるたびに裏で履歴を残してるよ。もし値が消えたら、ここをコピーして凛璃に見せて。<b style="color:var(--sub)">⚠LOST</b> と付いてる行が「値が消えた瞬間」。</div>';
+    h+='<div style="display:flex;gap:8px">';
+    h+='<button data-act="copyLog" style="flex:2;padding:10px;border-radius:10px;border:1px solid var(--secondary);background:rgba(74,158,173,.1);color:var(--secondary);font-size:12px;font-weight:700">ログをコピー</button>';
+    h+='<button data-act="clearLog" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:700">消去</button>';
+    h+='</div></div>';
+    h+='<div style="border-top:1px solid var(--borderLight);margin-top:18px;padding-top:16px">';
     h+='<button data-act="doFullReset" style="width:100%;padding:10px;border-radius:10px;border:1px solid rgba(192,57,43,.3);background:var(--dangerBg);color:var(--danger);font-size:11px;font-weight:700">⟲ 最新メニューに初期化（困ったとき用・記録は消える）</button>';
     h+='</div>';
     h+='<button data-act="closeModal" style="margin-top:16px;width:100%;padding:11px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--sub);font-size:13px;font-weight:700">閉じる</button>';
@@ -906,14 +1056,14 @@ function bind(){
       // input: 実際のキー操作。空にした場合もユーザー意図なので反映。
       var saveOnInput=function(){
         var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
-        var patch={};patch[f]=inp.value;writeSet(ex,si,patch);
+        var patch={};patch[f]=inp.value;writeSet(ex,si,patch,"input");
         flashSaved(ex,si);markFilled(ex,si);
       };
       // blur/change: フォーカス外れ等。★空値では絶対に上書きしない（勝手な消失を防ぐ）。
       var saveOnBlur=function(){
         if(inp.value==="")return;               // 空なら何もしない＝既存値を守る
         var ex=inp.getAttribute("data-ex"),si=parseInt(inp.getAttribute("data-si"));
-        var patch={};patch[f]=inp.value;writeSet(ex,si,patch);
+        var patch={};patch[f]=inp.value;writeSet(ex,si,patch,"blur");
         flashSaved(ex,si);markFilled(ex,si);
       };
       inp.addEventListener("input",saveOnInput);
@@ -961,7 +1111,7 @@ function flushActiveInput(){
           //   （renderで作られた空欄が既存の記録を空で潰すのを防ぐ）
           if(inp.value!==""){
             var cur=getSet(ex,si);
-            if((""+inp.value)!==(""+cur[f])){var patch={};patch[f]=inp.value;writeSet(ex,si,patch);}
+            if((""+inp.value)!==(""+cur[f])){var patch={};patch[f]=inp.value;writeSet(ex,si,patch,"flush");}
           }
         }
       }else if(f==="memo"){
@@ -1028,6 +1178,12 @@ function handle(act,el){
     case "addProgBlank": addProgram("新しいプログラム",{1:{title:"Day 1",subtitle:"カスタム",exercises:[]}}); UI.modal=null; render(); break;
     case "addProgCopy": addProgram(prog().name+" のコピー", deepCopy(menu())); UI.modal=null; render(); break;
     case "delProg": if(confirm("プログラム「"+el.getAttribute("data-name")+"」を削除する？記録も消えるよ。")){removeProgram(el.getAttribute("data-pid"));render();} break;
+    case "copyLog":
+      copyText(exportLog(),el);
+      break;
+    case "clearLog":
+      if(confirm("診断ログを消去する？（記録データには影響しないよ）")){clearLog();alert("ログを消去したよ。");}
+      break;
     case "doImport": doImport(); break;
     case "doFullReset": doFullReset(); break;
     case "doReplaceMenu": doReplaceMenu(); break;
@@ -1087,6 +1243,7 @@ function doImport(){
 }
 
 /* ============================ 起動 ============================ */
+migrateExIds();
 render();
 </script>
 </body>
